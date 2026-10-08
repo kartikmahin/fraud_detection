@@ -233,6 +233,8 @@ class DataPipeline:
             self.df.drop('customer_id', axis=1, inplace=True)
         if 'device_id' in self.df.columns:
             self.df.drop('device_id', axis=1, inplace=True)
+        if 'transaction_time' in self.df.columns:
+            self.df.drop('transaction_time', axis=1, inplace=True)
         
         X = self.df.drop('is_fraud', axis=1)
         y = self.df['is_fraud']

@@ -109,7 +109,7 @@ class FraudDetector:
                 df.drop(col, axis=1, inplace=True)
         
         # Remove non-feature columns
-        drop_cols = ['transaction_id', 'customer_id', 'device_id', 'is_fraud']
+        drop_cols = ['transaction_id', 'customer_id', 'device_id', 'is_fraud', 'transaction_time']
         for col in drop_cols:
             if col in df.columns:
                 df.drop(col, axis=1, inplace=True)
@@ -319,7 +319,7 @@ class LSTMFraudDetector:
                 df.drop(col, axis=1, inplace=True)
 
         # Remove non-feature columns
-        drop_cols = ['transaction_id', 'customer_id', 'device_id', 'is_fraud']
+        drop_cols = ['transaction_id', 'customer_id', 'device_id', 'is_fraud', 'transaction_time']
         for col in drop_cols:
             if col in df.columns:
                 df.drop(col, axis=1, inplace=True)
