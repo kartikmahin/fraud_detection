@@ -2,12 +2,19 @@
 
 A complete end-to-end production-ready deep learning project for detecting fraudulent banking transactions using **PyTorch** with dual-model architecture: **MLP (DNN)** and **Bidirectional LSTM**.
 
+## 🌐 Live Deployments
+- **Frontend (Vercel)**: [https://fraud-detection-fraud4.vercel.app/](https://fraud-detection-fraud4.vercel.app/)
+- **Backend API (Render)**: [https://fraud-detection-yda0.onrender.com](https://fraud-detection-yda0.onrender.com)
+- **API Health Check**: [https://fraud-detection-yda0.onrender.com/health](https://fraud-detection-yda0.onrender.com/health)
+- **Interactive Swagger Docs**: [https://fraud-detection-yda0.onrender.com/docs](https://fraud-detection-yda0.onrender.com/docs)
+
 ## Key Features
 
+- **Instant Zero-Retrain Inference** — Pre-trained deep learning weights are bundled and auto-loaded on backend startup
 - **Dual-Model Architecture** — MLP (6-layer DNN) + Bidirectional LSTM for comprehensive fraud detection
 - **PyTorch Deep Neural Networks** — FraudDetectorNet (MLP) & FraudLSTMNet (LSTM)
 - **FastAPI REST API** with CORS for React frontend integration
-- **React + Vite web interface** with model comparison dashboard
+- **React + Vite web interface** with dark mode and comparative dashboard
 - **Comprehensive test suite** (97 unit tests)
 - **Class-weighted BCE loss** for handling imbalanced data
 - **RobustScaler** for feature normalization
@@ -574,6 +581,30 @@ streamlit run streamlit_app.py
 To run the comprehensive suite of 97 unit tests:
 ```bash
 pytest tests/ -v
+```
+
+---
+
+### 5. Cloud Deployment Guide
+
+#### Backend (FastAPI on Render)
+1. Link your GitHub repository on [Render](https://render.com).
+2. Create a new **Web Service**.
+3. Set **Build Command**: `pip install -r requirements.txt`
+4. Set **Start Command**: `uvicorn api.app:app --host 0.0.0.0 --port $PORT`
+5. The pre-trained weights (`models/*.pt`, `models/*.pkl`) are automatically loaded upon server startup.
+
+#### Frontend (React on Vercel)
+1. Import the `frontend` folder into [Vercel](https://vercel.com).
+2. In **Settings -> Environment Variables**, add:
+   - `VITE_API_URL` = `https://<your-render-service>.onrender.com` (Select **Config** type)
+3. Under **Settings -> Deployment Protection**, ensure **Vercel Authentication** is disabled for public access.
+4. Deploy the site.
+
+#### Docker Container
+```bash
+docker build -t fraud-detection-api .
+docker run -p 8000:8000 fraud-detection-api
 ```
 
 ---
