@@ -315,16 +315,7 @@ export default function Predict() {
                 onChange={e => setReceiptFile(e.target.files[0])}
               />
             </div>
-            <div className="form-group">
-              <label className="form-label">Device ID</label>
-              <input
-                type="text"
-                className="form-input"
-                value={form.device_id}
-                onChange={(e) => handleChange('device_id', e.target.value)}
-              />
-            </div>
-            </div>
+
 
           <div className="slider-container" style={{ marginTop: 'var(--space-md)' }}>
             <div className="slider-header">
@@ -343,16 +334,7 @@ export default function Predict() {
               <span>More Alerts</span>
               <span>Fewer Alerts</span>
             </div>
-            <div className="form-group">
-              <label className="form-label">Device ID</label>
-              <input
-                type="text"
-                className="form-input"
-                value={form.device_id}
-                onChange={(e) => handleChange('device_id', e.target.value)}
-              />
-            </div>
-            </div>
+
 
           <button
             className="btn btn-primary btn-lg"
@@ -538,16 +520,7 @@ export default function Predict() {
                 </>
               )}
             </div>
-            <div className="form-group">
-              <label className="form-label">Device ID</label>
-              <input
-                type="text"
-                className="form-input"
-                value={form.device_id}
-                onChange={(e) => handleChange('device_id', e.target.value)}
-              />
-            </div>
-            </div>
+
         </div>
       )}
 
