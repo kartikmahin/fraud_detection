@@ -45,9 +45,10 @@ dist/
 .vscode/
 
 # Project specifics
-models/*.pkl
-models/*.pth
-models/*.pt
+# Allow pre-trained models to be committed for instant zero-retrain web deployment
+!models/*.pkl
+!models/*.pt
+!models/*.json
 data/*.csv
 data/*.json
 !data/.gitkeep
