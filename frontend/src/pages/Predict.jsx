@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { predictFraud, predictFraudLSTM } from '../api';
+import { predictFraud, predictFraudLSTM, predictFromReceipt } from '../api';
 
 /**
  * Generate a human-readable analysis summary based on the transaction inputs
@@ -143,7 +143,7 @@ export default function Predict() {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [analysisForm, setAnalysisForm] = useState(null);
+  const [receiptFile, setReceiptFile] = useState(null);
   const [selectedModel, setSelectedModel] = useState('mlp');
 
   const handleChange = (field, value) => {
@@ -156,8 +156,14 @@ export default function Predict() {
     setResult(null);
     setAnalysisForm(null);
     try {
-      const predictFn = selectedModel === 'lstm' ? predictFraudLSTM : predictFraud;
-      const res = await predictFn(form);
+      let res;
+      if (receiptFile) {
+        // Use the receipt endpoint (file + form data)
+        res = await predictFromReceipt(form, receiptFile, selectedModel);
+      } else {
+        const predictFn = selectedModel === 'lstm' ? predictFraudLSTM : predictFraud;
+        res = await predictFn(form);
+      }
       setResult({ ...res, model_used: selectedModel });
       setAnalysisForm({ ...form });
     } catch (err) {
@@ -301,6 +307,15 @@ export default function Predict() {
             </div>
 
             <div className="form-group">
+              <label className="form-label">Upload Receipt (optional)</label>
+              <input
+                type="file"
+                accept="image/*,application/pdf"
+                className="form-input"
+                onChange={e => setReceiptFile(e.target.files[0])}
+              />
+            </div>
+            <div className="form-group">
               <label className="form-label">Device ID</label>
               <input
                 type="text"
@@ -309,7 +324,7 @@ export default function Predict() {
                 onChange={(e) => handleChange('device_id', e.target.value)}
               />
             </div>
-          </div>
+            </div>
 
           <div className="slider-container" style={{ marginTop: 'var(--space-md)' }}>
             <div className="slider-header">
@@ -328,7 +343,16 @@ export default function Predict() {
               <span>More Alerts</span>
               <span>Fewer Alerts</span>
             </div>
-          </div>
+            <div className="form-group">
+              <label className="form-label">Device ID</label>
+              <input
+                type="text"
+                className="form-input"
+                value={form.device_id}
+                onChange={(e) => handleChange('device_id', e.target.value)}
+              />
+            </div>
+            </div>
 
           <button
             className="btn btn-primary btn-lg"
@@ -514,7 +538,16 @@ export default function Predict() {
                 </>
               )}
             </div>
-          </div>
+            <div className="form-group">
+              <label className="form-label">Device ID</label>
+              <input
+                type="text"
+                className="form-input"
+                value={form.device_id}
+                onChange={(e) => handleChange('device_id', e.target.value)}
+              />
+            </div>
+            </div>
         </div>
       )}
 

@@ -48,18 +48,28 @@ export async function predictFraud(transaction) {
   return res.json();
 }
 
-export async function predictFraudLSTM(transaction) {
-  const res = await fetch(`${API_BASE}/predict-lstm`, {
+export async function predictFromReceipt(form, file=null, model='mlp') {
+  const formData = new FormData();
+  if (file) {
+    formData.append('file', file);
+  }
+  // Append all transaction fields
+  for (const [key, value] of Object.entries(form)) {
+    formData.append(key, value);
+  }
+  formData.append('model', model);
+
+  const res = await fetch(`${API_BASE}/predict-receipt`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(transaction),
+    body: formData,
   });
   if (!res.ok) {
     const error = await res.json();
-    throw new Error(error.detail || 'LSTM Prediction failed');
+    throw new Error(error.detail || 'Receipt prediction failed');
   }
   return res.json();
 }
+
 
 export async function trainModel() {
   const res = await fetch(`${API_BASE}/train`, {
