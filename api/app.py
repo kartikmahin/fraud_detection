@@ -3,10 +3,10 @@ FastAPI Application for Fraud Detection (PyTorch)
 REST API with CORS for React frontend integration
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 import numpy as np
 import json
 import pickle
@@ -15,9 +15,10 @@ from pathlib import Path
 import sys
 import os
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from src.predict import FraudDetector, LSTMFraudDetector
+
 
 app = FastAPI(
     title="Fraud Detection API (PyTorch)",
@@ -249,6 +250,60 @@ async def get_lstm_training_history():
     return {"message": "No LSTM training history available. Train the LSTM model first."}
 
 
+@app.post("/predict-receipt", response_model=PredictionResponse)
+async def predict_from_receipt(
+    file: UploadFile = File(None),
+    transaction_amount: Optional[float] = Form(None),
+    transaction_time: Optional[int] = Form(None),
+    location: Optional[str] = Form(None),
+    device_id: Optional[str] = Form(None),
+    merchant_category: Optional[str] = Form(None),
+    account_age_days: Optional[int] = Form(None),
+    transaction_count_24h: Optional[int] = Form(None),
+    avg_transaction_amount: Optional[float] = Form(None),
+    model: str = Form("mlp")
+) -> PredictionResponse:
+    """Predict fraud from an uploaded receipt (image/pdf) or form fields.
+    If the receipt file is provided, a real implementation would run OCR to extract
+    the required fields. Here we use a placeholder that simply falls back to the
+    provided form values and defaults for any missing feature.
+    """
+    # Default values for missing features (could be tuned from training stats)
+    defaults = {
+        "transaction_amount": 100.0,
+        "transaction_time": 43200,
+        "location": "Mumbai",
+        "device_id": "UNKNOWN",
+        "merchant_category": "retail",
+        "account_age_days": 365,
+        "transaction_count_24h": 1,
+        "avg_transaction_amount": 100.0,
+    }
+    # Assemble feature dict from supplied form values, falling back to defaults
+    data: Dict[str, Any] = {}
+    for key, default in defaults.items():
+        val = locals().get(key)
+        data[key] = val if val is not None else default
+
+    # TODO: extract from `file` using OCR (e.g., pytesseract) – omitted for brevity
+
+    # Choose model
+    if model.lower() == "lstm":
+        if lstm_detector is None or lstm_detector.model is None:
+            raise HTTPException(status_code=503, detail="LSTM model not loaded.")
+        result = lstm_detector.predict(data)
+    else:
+        if detector is None or detector.model is None:
+            raise HTTPException(status_code=503, detail="MLP model not loaded.")
+        result = detector.predict(data)
+
+    message = ("Transaction flagged as potentially fraudulent" if result["is_fraud"] else "Transaction appears legitimate")
+    return PredictionResponse(
+        is_fraud=result["is_fraud"],
+        fraud_probability=result["fraud_probability"],
+        risk_level=result["risk_level"],
+        message=message,
+    )
 @app.post("/predict", response_model=PredictionResponse)
 async def predict_fraud(transaction: Transaction):
     """Predict if a transaction is fraudulent"""
@@ -271,9 +326,9 @@ async def predict_fraud(transaction: Transaction):
             risk_level=result['risk_level'],
             message=message
         )
-        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
+
 
 
 @app.post("/batch-predict", response_model=BatchPredictionResponse)
