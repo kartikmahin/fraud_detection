@@ -352,8 +352,7 @@ export default function Predict() {
             )}
           </button>
         </div>
-        </div>
-        
+
         {/* Result */}
         <div className="card animate-in animate-in-delay-1">
           <div className="card-header">
