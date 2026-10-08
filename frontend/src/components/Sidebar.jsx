@@ -67,10 +67,7 @@ export default function Sidebar({ activePage, onNavigate, isTraining, theme, onT
       </div>
 
       <div className="sidebar-footer">
-        <div className="status-badge">
-          <span className={`status-dot ${isOnline ? '' : 'offline'}`}></span>
-          <span>{isOnline ? 'API Connected' : 'API Offline'}</span>
-        </div>
+        {/* API status badge removed */}
         {isOnline && (
           <>
             <div className="status-badge" style={{ marginTop: '6px' }}>
