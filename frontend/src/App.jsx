@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from 'react';
 import Sidebar from './components/Sidebar';
 import Dashboard from './pages/Dashboard';
 import Predict from './pages/Predict';
+import Complaint from './pages/Complaint';
 import Training from './pages/Training';
 import Metrics from './pages/Metrics';
 import About from './pages/About';
@@ -53,6 +54,9 @@ function App() {
         </div>
         <div style={{ display: activePage === 'predict' ? 'block' : 'none' }}>
           <Predict />
+        </div>
+        <div style={{ display: activePage === 'complaint' ? 'block' : 'none' }}>
+          <Complaint />
         </div>
         <div style={{ display: activePage === 'training' ? 'block' : 'none' }}>
           <Training

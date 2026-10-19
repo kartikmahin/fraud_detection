@@ -21,6 +21,7 @@ export default function Sidebar({ activePage, onNavigate, isTraining, theme, onT
   const navItems = [
     { id: 'dashboard', label: 'Dashboard' },
     { id: 'predict', label: 'Predict' },
+    { id: 'complaint', label: 'File Complaint' },
     { id: 'training', label: 'Training' },
     { id: 'metrics', label: 'Model Metrics' },
     { id: 'about', label: 'About' },

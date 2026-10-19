@@ -94,6 +94,19 @@ export async function extractReceipt(form, file=null) {
 }
 
 
+export async function fileComplaint(complaintData) {
+  const res = await fetch(`${API_BASE}/file-complaint`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(complaintData),
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.detail || 'Complaint filing failed');
+  }
+  return res.json();
+}
+
 export async function trainModel() {
   const res = await fetch(`${API_BASE}/train`, {
     method: 'POST',
