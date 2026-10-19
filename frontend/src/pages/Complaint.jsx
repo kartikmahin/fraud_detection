@@ -52,6 +52,10 @@ export default function Complaint() {
         setError('Microphone access denied. Please allow microphone access in your browser settings.');
       } else if (event.error === 'no-speech') {
         setError('No speech detected. Please try again.');
+      } else if (event.error === 'network') {
+        setError('Speech recognition requires an internet connection (uses Google speech service). Please check your connection or type your complaint instead.');
+      } else if (event.error === 'aborted') {
+        setError('Speech recognition was aborted. Please try again.');
       } else {
         setError(`Speech recognition error: ${event.error}. Please try typing your complaint instead.`);
       }
@@ -110,7 +114,8 @@ export default function Complaint() {
       });
       setResult(res);
     } catch (err) {
-      setError(err.message);
+      const msg = err?.message || err?.toString() || 'Unknown error occurred';
+      setError(msg);
     } finally {
       setLoading(false);
     }
