@@ -72,11 +72,11 @@ export default function Sidebar({ activePage, onNavigate, isTraining, theme, onT
           <>
             <div className="status-badge" style={{ marginTop: '6px' }}>
               <span className={`status-dot ${mlpLoaded ? '' : 'offline'}`}></span>
-              <span>{mlpLoaded ? 'MLP Model' : 'MLP Not Loaded'}</span>
+              <span>{mlpLoaded ? 'MLP Model ✓' : 'MLP Not Loaded'}</span>
             </div>
             <div className="status-badge" style={{ marginTop: '4px' }}>
               <span className={`status-dot ${lstmLoaded ? '' : 'offline'}`}></span>
-              <span>{lstmLoaded ? 'LSTM Model' : 'LSTM Not Loaded'}</span>
+              <span>{lstmLoaded ? 'LSTM Model ✓' : 'LSTM Not Loaded'}</span>
             </div>
           </>
         )}
