@@ -25,7 +25,7 @@ export default function Complaint() {
   const startListening = () => {
     if (!SpeechRecognition) {
       setSpeechSupported(false);
-      setError('Speech recognition is not supported in this browser. Please use Chrome or Edge.');
+      setError('Speech recognition is not supported in this browser. Please use Chrome or Edge, or type your complaint manually.');
       return;
     }
 
@@ -36,6 +36,7 @@ export default function Complaint() {
 
     recognition.onstart = () => {
       setIsListening(true);
+      setError(null);
     };
 
     recognition.onresult = (event) => {
@@ -47,7 +48,13 @@ export default function Complaint() {
     };
 
     recognition.onerror = (event) => {
-      setError(`Speech recognition error: ${event.error}`);
+      if (event.error === 'not-allowed') {
+        setError('Microphone access denied. Please allow microphone access in your browser settings.');
+      } else if (event.error === 'no-speech') {
+        setError('No speech detected. Please try again.');
+      } else {
+        setError(`Speech recognition error: ${event.error}. Please try typing your complaint instead.`);
+      }
       setIsListening(false);
     };
 
@@ -56,7 +63,12 @@ export default function Complaint() {
     };
 
     recognitionRef.current = recognition;
-    recognition.start();
+    try {
+      recognition.start();
+    } catch (err) {
+      setError('Failed to start speech recognition. Please try again.');
+      setIsListening(false);
+    }
   };
 
   const stopListening = () => {
@@ -268,9 +280,11 @@ export default function Complaint() {
                 Listening... Speak your complaint clearly
               </div>
             )}
-            <div className="form-hint">
-              {description.length} characters | Tip: Include details like date, amount, bank name, and how the fraud occurred
-            </div>
+{!speechSupported && (
+              <div className="form-hint" style={{ color: 'var(--warning)', marginTop: '4px' }}>
+                Speech recognition is not available in this browser. Please use Chrome or Edge, or type your complaint manually.
+              </div>
+            )}
           </div>
 
           {/* Optional Details */}

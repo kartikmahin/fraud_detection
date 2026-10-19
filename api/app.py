@@ -78,6 +78,27 @@ class ReceiptExtractResponse(BaseModel):
     message: str
 
 
+class ComplaintRequest(BaseModel):
+    description: str = Field(..., min_length=10, description="Description of the fraud")
+    name: Optional[str] = Field(None, description="Complainant name")
+    phone: Optional[str] = Field(None, description="Complainant phone number")
+    email: Optional[str] = Field(None, description="Complainant email")
+    fraud_amount: Optional[float] = Field(None, ge=0, description="Amount lost to fraud (INR)")
+    transaction_date: Optional[str] = Field(None, description="Date of fraudulent transaction")
+    bank_name: Optional[str] = Field(None, description="Bank name involved")
+    upi_id: Optional[str] = Field(None, description="UPI ID involved")
+    merchant_name: Optional[str] = Field(None, description="Merchant or recipient name")
+    transaction_id: Optional[str] = Field(None, description="Transaction reference ID")
+
+
+class ComplaintResponse(BaseModel):
+    complaint_id: str
+    message: str
+    reference_number: str
+    next_steps: List[str]
+    portal_url: str
+
+
 class BatchPredictionRequest(BaseModel):
     transactions: List[Transaction]
     threshold: Optional[float] = Field(0.5, ge=0.0, le=1.0)
@@ -179,6 +200,8 @@ async def root():
         "endpoints": {
             "predict": "/predict",
             "predict_receipt": "/predict-receipt",
+            "extract_receipt": "/extract-receipt",
+            "file_complaint": "/file-complaint",
             "predict_lstm": "/predict-lstm",
             "batch_predict": "/batch-predict",
             "health": "/health",
@@ -203,6 +226,74 @@ async def health_check():
         "device": str(detector.device) if detector else "N/A",
         "framework": "PyTorch"
     }
+
+
+# --- Complaint filing storage ---
+import json as _json
+from datetime import datetime as _dt
+COMPLAINTS_FILE = BASE_DIR / "complaints.json"
+
+def _load_complaints():
+    if COMPLAINTS_FILE.exists():
+        try:
+            with open(COMPLAINTS_FILE, "r") as f:
+                return _json.load(f)
+        except Exception:
+            return []
+    return []
+
+def _save_complaints(complaints):
+    with open(COMPLAINTS_FILE, "w") as f:
+        _json.dump(complaints, f, indent=2)
+
+
+@app.post("/file-complaint", response_model=ComplaintResponse)
+async def file_complaint(complaint: ComplaintRequest) -> ComplaintResponse:
+    """
+    File a fraud complaint. Generates a reference number and stores the complaint.
+    Returns the reference number and next steps for the user to follow.
+    """
+    import uuid
+    complaint_id = f"CCP-{_dt.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+    reference_number = f"REF-{uuid.uuid4().hex[:8].upper()}"
+
+    complaint_record = {
+        "complaint_id": complaint_id,
+        "reference_number": reference_number,
+        "description": complaint.description,
+        "name": complaint.name,
+        "phone": complaint.phone,
+        "email": complaint.email,
+        "fraud_amount": complaint.fraud_amount,
+        "transaction_date": complaint.transaction_date,
+        "bank_name": complaint.bank_name,
+        "upi_id": complaint.upi_id,
+        "merchant_name": complaint.merchant_name,
+        "transaction_id": complaint.transaction_id,
+        "status": "submitted",
+        "created_at": _dt.now().isoformat(),
+    }
+
+    complaints = _load_complaints()
+    complaints.append(complaint_record)
+    _save_complaints(complaints)
+
+    next_steps = [
+        "Visit the National Cyber Crime Portal at https://cybercrime.gov.in to complete official filing",
+        "Keep your complaint reference number for future correspondence",
+        "Save all transaction screenshots, bank statements, and communication records",
+        "Contact your bank immediately to report the fraud and request a chargeback if applicable",
+        "If the fraud involves UPI, report it to your UPI app and bank",
+        "Monitor your bank account for any further unauthorized transactions",
+    ]
+
+    return ComplaintResponse(
+        complaint_id=complaint_id,
+        message="Complaint filed successfully. Please complete the official filing on the National Cyber Crime Portal.",
+        reference_number=reference_number,
+        next_steps=next_steps,
+        portal_url="https://cybercrime.gov.in",
+    )
 
 
 @app.get("/model-info")
