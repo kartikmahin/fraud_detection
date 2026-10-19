@@ -49,11 +49,11 @@ export default function Complaint() {
 
     recognition.onerror = (event) => {
       if (event.error === 'not-allowed') {
-        setError('Microphone access denied. Please allow microphone access in your browser settings.');
+        setError('Microphone access denied. Please allow microphone access in your browser settings and try again.');
       } else if (event.error === 'no-speech') {
-        setError('No speech detected. Please try again.');
+        setError('No speech detected. Please try again or type your complaint manually.');
       } else if (event.error === 'network') {
-        setError('Speech recognition requires an internet connection (uses Google speech service). Please check your connection or type your complaint instead.');
+        setError('Speech recognition requires an internet connection to Google speech servers. If you are on a restricted network, please type your complaint instead.');
       } else if (event.error === 'aborted') {
         setError('Speech recognition was aborted. Please try again.');
       } else {
@@ -285,9 +285,17 @@ export default function Complaint() {
                 Listening... Speak your complaint clearly
               </div>
             )}
-{!speechSupported && (
+            <div className="form-hint">
+              {description.length} characters | Tip: Include details like date, amount, bank name, and how the fraud occurred
+            </div>
+            {!speechSupported && (
               <div className="form-hint" style={{ color: 'var(--warning)', marginTop: '4px' }}>
                 Speech recognition is not available in this browser. Please use Chrome or Edge, or type your complaint manually.
+              </div>
+            )}
+            {speechSupported && (
+              <div className="form-hint" style={{ color: 'var(--text-muted)', marginTop: '4px', fontSize: '0.7rem' }}>
+                Note: Voice input requires an internet connection (uses browser speech service). If it doesn't work, please type your complaint.
               </div>
             )}
           </div>
