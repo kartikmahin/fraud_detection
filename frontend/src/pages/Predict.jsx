@@ -344,6 +344,11 @@ export default function Predict() {
                 onChange={handleReceiptUpload}
                 disabled={extracting}
               />
+              {extracting && (
+                <div style={{ fontSize: '0.75rem', color: 'var(--accent-blue)', marginTop: '4px' }}>
+                  Extracting features from receipt...
+                </div>
+              )}
             </div>
             <div className="form-group">
               <label className="form-label">Device ID</label>
