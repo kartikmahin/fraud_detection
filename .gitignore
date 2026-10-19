@@ -53,4 +53,5 @@ data/*.csv
 data/*.json
 !data/.gitkeep
 nul
+complaints.json
 
