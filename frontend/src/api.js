@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_URL || 'https://fraud-detection-yda0.onrender.com';
+const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
 
 export async function checkHealth() {
   const res = await fetch(`${API_BASE}/health`);
@@ -35,11 +35,11 @@ export async function getLSTMMetrics() {
   return res.json();
 }
 
-export async function predictFraud(transaction) {
+export async function predictFraud(transaction, threshold = 0.5) {
   const res = await fetch(`${API_BASE}/predict`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(transaction),
+    body: JSON.stringify({ ...transaction, threshold }),
   });
   if (!res.ok) {
     const error = await res.json();
@@ -70,6 +70,29 @@ export async function predictFromReceipt(form, file=null, model='mlp') {
   return res.json();
 }
 
+export async function extractReceipt(form, file=null) {
+  const formData = new FormData();
+  if (file) {
+    formData.append('file', file);
+  }
+  // Append all transaction fields as form overrides
+  for (const [key, value] of Object.entries(form)) {
+    if (value !== '' && value !== null && value !== undefined) {
+      formData.append(key, value);
+    }
+  }
+
+  const res = await fetch(`${API_BASE}/extract-receipt`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const error = await res.json();
+    throw new Error(error.detail || 'Receipt extraction failed');
+  }
+  return res.json();
+}
+
 
 export async function trainModel() {
   const res = await fetch(`${API_BASE}/train`, {
@@ -92,4 +115,3 @@ export async function trainLSTMModel() {
   }
   return res.json();
 }
-

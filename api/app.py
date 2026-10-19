@@ -10,14 +10,19 @@ from typing import Optional, List, Dict, Any
 import numpy as np
 import json
 import pickle
-import torch
 from pathlib import Path
 import sys
 import os
 
+try:
+    import torch
+except ImportError:
+    torch = None
+
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from src.predict import FraudDetector, LSTMFraudDetector
+from src.receipt_parser import GENERAL_FEATURE_DEFAULTS, extract_and_impute_receipt
 
 
 app = FastAPI(
@@ -42,17 +47,34 @@ class Transaction(BaseModel):
     transaction_amount: float = Field(..., gt=0, description="Transaction amount in INR")
     transaction_time: int = Field(..., ge=0, le=86399, description="Seconds since midnight")
     location: str = Field(..., description="City code")
-    device_id: str = Field(..., description="Device identifier")
+    device_id: str = Field("DEV001", description="Device identifier")
     merchant_category: str = Field(..., description="Category: retail, grocery, restaurant, gas, online")
     account_age_days: int = Field(..., ge=0, description="Age of account in days")
     transaction_count_24h: int = Field(..., ge=0, description="Transactions in last 24 hours")
     avg_transaction_amount: float = Field(..., gt=0, description="Average transaction amount")
+    threshold: Optional[float] = Field(0.5, ge=0.0, le=1.0, description="Classification threshold")
 
 
 class PredictionResponse(BaseModel):
     is_fraud: bool
     fraud_probability: float
     risk_level: str
+    message: str
+    extracted_features: Optional[Dict[str, Any]] = None
+    imputed_features: Optional[Dict[str, Any]] = None
+    missing_features: Optional[List[str]] = None
+    final_features: Optional[Dict[str, Any]] = None
+    raw_text: Optional[str] = None
+    model_used: Optional[str] = None
+
+
+class ReceiptExtractResponse(BaseModel):
+    """Response for receipt OCR extraction only (no prediction)"""
+    extracted_features: Dict[str, Any]
+    imputed_features: Dict[str, Any]
+    missing_features: List[str]
+    final_features: Dict[str, Any]
+    raw_text: Optional[str] = None
     message: str
 
 
@@ -67,74 +89,82 @@ class BatchPredictionResponse(BaseModel):
     flagged_count: int
 
 
+def _model_to_dict(model_obj: BaseModel) -> Dict[str, Any]:
+    """Compatible dict conversion for both Pydantic v1 and v2."""
+    if hasattr(model_obj, "model_dump"):
+        return model_obj.model_dump()
+    return model_obj.dict()
+
+
 # --- Global state ---
-detector = None
-lstm_detector = None
+detector: Optional[FraudDetector] = None
+lstm_detector: Optional[LSTMFraudDetector] = None
 training_history = None
 training_history_lstm = None
 eval_metrics = None
 eval_metrics_lstm = None
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+MODELS_DIR = BASE_DIR / "models"
+
+
+def _ensure_models_loaded():
+    """Ensure MLP and LSTM detectors are initialized and loaded if model files exist."""
+    global detector, lstm_detector
+    if detector is None:
+        detector = FraudDetector(model_path=str(MODELS_DIR))
+        model_path = MODELS_DIR / "fraud_detector.pt"
+        if model_path.exists():
+            try:
+                detector.load_model()
+                detector.load_scaler()
+                detector.load_feature_names()
+            except Exception as e:
+                print(f"Warning: Error loading MLP model: {e}")
+                detector.model = None
+
+    if lstm_detector is None:
+        lstm_detector = LSTMFraudDetector(model_path=str(MODELS_DIR))
+        lstm_model_path = MODELS_DIR / "fraud_detector_lstm.pt"
+        if lstm_model_path.exists():
+            try:
+                lstm_detector.load_model()
+                lstm_detector.load_scaler()
+                lstm_detector.load_feature_names()
+            except Exception as e:
+                print(f"Warning: Error loading LSTM model: {e}")
+                lstm_detector.model = None
 
 
 @app.on_event("startup")
 async def load_model():
     """Load PyTorch models (MLP + LSTM) and scaler on startup"""
     global detector, lstm_detector, training_history, training_history_lstm, eval_metrics, eval_metrics_lstm
-    
-    # --- MLP Model ---
-    detector = FraudDetector()
-    
-    model_path = Path("models/fraud_detector.pt")
-    if model_path.exists():
-        try:
-            detector.load_model()
-            detector.load_scaler()
-            detector.load_feature_names()
-            print("PyTorch MLP model loaded successfully")
-        except Exception as e:
-            print(f"Warning: Error loading MLP model: {e}")
-            detector.model = None
-    else:
-        print("Warning: No trained MLP model found. Train first via /train endpoint or CLI.")
-    
-    # --- LSTM Model ---
-    lstm_detector = LSTMFraudDetector()
-    
-    lstm_model_path = Path("models/fraud_detector_lstm.pt")
-    if lstm_model_path.exists():
-        try:
-            lstm_detector.load_model()
-            lstm_detector.load_scaler()
-            lstm_detector.load_feature_names()
-            print("PyTorch LSTM model loaded successfully")
-        except Exception as e:
-            print(f"Warning: Error loading LSTM model: {e}")
-            lstm_detector.model = None
-    else:
-        print("Warning: No trained LSTM model found. Train via /train-lstm endpoint.")
-    
+
+    _ensure_models_loaded()
+
     # Load MLP training history
-    history_path = Path("models/training_history.json")
+    history_path = MODELS_DIR / "training_history.json"
     if history_path.exists():
-        with open(history_path, 'r') as f:
+        with open(history_path, "r") as f:
             training_history = json.load(f)
-    
+
     # Load LSTM training history
-    lstm_history_path = Path("models/training_history_lstm.json")
+    lstm_history_path = MODELS_DIR / "training_history_lstm.json"
     if lstm_history_path.exists():
-        with open(lstm_history_path, 'r') as f:
+        with open(lstm_history_path, "r") as f:
             training_history_lstm = json.load(f)
-    
+
     # Load MLP eval metrics
-    metrics_path = Path("models/eval_metrics.json")
+    metrics_path = MODELS_DIR / "eval_metrics.json"
     if metrics_path.exists():
-        with open(metrics_path, 'r') as f:
+        with open(metrics_path, "r") as f:
             eval_metrics = json.load(f)
-    
+
     # Load LSTM eval metrics
-    lstm_metrics_path = Path("models/eval_metrics_lstm.json")
+    lstm_metrics_path = MODELS_DIR / "eval_metrics_lstm.json"
     if lstm_metrics_path.exists():
-        with open(lstm_metrics_path, 'r') as f:
+        with open(lstm_metrics_path, "r") as f:
             eval_metrics_lstm = json.load(f)
 
 
@@ -148,6 +178,7 @@ async def root():
         "framework": "PyTorch",
         "endpoints": {
             "predict": "/predict",
+            "predict_receipt": "/predict-receipt",
             "predict_lstm": "/predict-lstm",
             "batch_predict": "/batch-predict",
             "health": "/health",
@@ -164,6 +195,7 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
+    _ensure_models_loaded()
     return {
         "status": "healthy",
         "model_loaded": detector is not None and detector.model is not None,
@@ -176,13 +208,14 @@ async def health_check():
 @app.get("/model-info")
 async def model_info():
     """Get model architecture and info"""
+    _ensure_models_loaded()
     if detector is None or detector.model is None:
         return {"message": "No model loaded. Train a model first."}
-    
+
     model = detector.model
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    
+
     return {
         "model_type": "FraudDetectorNet (Deep Neural Network)",
         "framework": "PyTorch",
@@ -198,13 +231,13 @@ async def model_info():
 async def get_training_history():
     """Get training metrics history for visualization"""
     global training_history
-    
-    history_path = Path("models/training_history.json")
+
+    history_path = MODELS_DIR / "training_history.json"
     if history_path.exists():
-        with open(history_path, 'r') as f:
+        with open(history_path, "r") as f:
             training_history = json.load(f)
         return training_history
-    
+
     return {"message": "No training history available. Train a model first."}
 
 
@@ -212,13 +245,13 @@ async def get_training_history():
 async def get_metrics():
     """Get MLP evaluation metrics"""
     global eval_metrics
-    
-    metrics_path = Path("models/eval_metrics.json")
+
+    metrics_path = MODELS_DIR / "eval_metrics.json"
     if metrics_path.exists():
-        with open(metrics_path, 'r') as f:
+        with open(metrics_path, "r") as f:
             eval_metrics = json.load(f)
         return eval_metrics
-    
+
     return {"message": "No evaluation metrics available. Train a model first."}
 
 
@@ -226,13 +259,13 @@ async def get_metrics():
 async def get_lstm_metrics():
     """Get LSTM evaluation metrics"""
     global eval_metrics_lstm
-    
-    metrics_path = Path("models/eval_metrics_lstm.json")
+
+    metrics_path = MODELS_DIR / "eval_metrics_lstm.json"
     if metrics_path.exists():
-        with open(metrics_path, 'r') as f:
+        with open(metrics_path, "r") as f:
             eval_metrics_lstm = json.load(f)
         return eval_metrics_lstm
-    
+
     return {"message": "No LSTM evaluation metrics available. Train the LSTM model first."}
 
 
@@ -240,19 +273,19 @@ async def get_lstm_metrics():
 async def get_lstm_training_history():
     """Get LSTM training metrics history for visualization"""
     global training_history_lstm
-    
-    history_path = Path("models/training_history_lstm.json")
+
+    history_path = MODELS_DIR / "training_history_lstm.json"
     if history_path.exists():
-        with open(history_path, 'r') as f:
+        with open(history_path, "r") as f:
             training_history_lstm = json.load(f)
         return training_history_lstm
-    
+
     return {"message": "No LSTM training history available. Train the LSTM model first."}
 
 
-@app.post("/predict-receipt", response_model=PredictionResponse)
-async def predict_from_receipt(
-    file: UploadFile = File(None),
+@app.post("/extract-receipt", response_model=ReceiptExtractResponse)
+async def extract_receipt_features(
+    file: Optional[UploadFile] = File(None),
     transaction_amount: Optional[float] = Form(None),
     transaction_time: Optional[int] = Form(None),
     location: Optional[str] = Form(None),
@@ -261,104 +294,240 @@ async def predict_from_receipt(
     account_age_days: Optional[int] = Form(None),
     transaction_count_24h: Optional[int] = Form(None),
     avg_transaction_amount: Optional[float] = Form(None),
-    model: str = Form("mlp")
-) -> PredictionResponse:
-    """Predict fraud from an uploaded receipt (image/pdf) or form fields.
-    If the receipt file is provided, a real implementation would run OCR to extract
-    the required fields. Here we use a placeholder that simply falls back to the
-    provided form values and defaults for any missing feature.
+) -> ReceiptExtractResponse:
     """
-    # Default values for missing features (could be tuned from training stats)
-    defaults = {
-        "transaction_amount": 100.0,
-        "transaction_time": 43200,
-        "location": "Mumbai",
-        "device_id": "UNKNOWN",
-        "merchant_category": "retail",
-        "account_age_days": 365,
-        "transaction_count_24h": 1,
-        "avg_transaction_amount": 100.0,
+    Extract transaction features from an uploaded receipt/bill (image, PDF, text, JSON, CSV).
+    This endpoint ONLY performs OCR extraction and feature imputation - NO prediction is made.
+    Use this for live-updating form fields when a user uploads a receipt.
+    """
+    _ensure_models_loaded()
+
+    file_bytes: Optional[bytes] = None
+    filename = ""
+    content_type = ""
+
+    if file is not None:
+        file_bytes = await file.read()
+        filename = file.filename or ""
+        content_type = file.content_type or ""
+
+    form_fields = {
+        "transaction_amount": transaction_amount,
+        "transaction_time": transaction_time,
+        "location": location,
+        "device_id": device_id,
+        "merchant_category": merchant_category,
+        "account_age_days": account_age_days,
+        "transaction_count_24h": transaction_count_24h,
+        "avg_transaction_amount": avg_transaction_amount,
     }
-    # Assemble feature dict from supplied form values, falling back to defaults
-    data: Dict[str, Any] = {}
-    for key, default in defaults.items():
-        val = locals().get(key)
-        data[key] = val if val is not None else default
+    supplied_overrides = {k: v for k, v in form_fields.items() if v is not None}
 
-    # TODO: extract from `file` using OCR (e.g., pytesseract) – omitted for brevity
+    # Use form overrides for missing features
+    parsed = extract_and_impute_receipt(
+        file_bytes=file_bytes,
+        filename=filename,
+        content_type=content_type,
+        form_overrides=supplied_overrides,
+    )
 
-    # Choose model
-    if model.lower() == "lstm":
+    final_features = parsed["final_features"]
+    extracted_features = parsed["extracted_features"]
+    imputed_features = parsed["imputed_features"]
+    missing_features = parsed["missing_features"]
+    raw_text = parsed["raw_text"]
+
+    extracted_names = list(extracted_features.keys())
+    imputed_names = list(imputed_features.keys())
+
+    if file_bytes:
+        message = (
+            f"Extracted {len(extracted_names)} feature(s) from receipt"
+            f"{': ' + ', '.join(extracted_names) if extracted_names else ''}; "
+            f"applied general defaults for {len(imputed_names)} missing feature(s)"
+        )
+    else:
+        message = "No file uploaded - used provided form values with general defaults"
+
+    return ReceiptExtractResponse(
+        extracted_features=extracted_features,
+        imputed_features=imputed_features,
+        missing_features=missing_features,
+        final_features=final_features,
+        raw_text=raw_text,
+        message=message,
+    )
+
+
+@app.post("/predict-receipt", response_model=PredictionResponse)
+async def predict_from_receipt(
+    file: Optional[UploadFile] = File(None),
+    transaction_amount: Optional[float] = Form(None),
+    transaction_time: Optional[int] = Form(None),
+    location: Optional[str] = Form(None),
+    device_id: Optional[str] = Form(None),
+    merchant_category: Optional[str] = Form(None),
+    account_age_days: Optional[int] = Form(None),
+    transaction_count_24h: Optional[int] = Form(None),
+    avg_transaction_amount: Optional[float] = Form(None),
+    threshold: float = Form(0.5),
+    use_form_overrides: bool = Form(False),
+    model: str = Form("mlp"),
+) -> PredictionResponse:
+    """
+    Predict whether a transaction is fraudulent from an uploaded bill/receipt
+    (image, PDF, text, JSON, or CSV).
+    1. Extracts available input features directly from the uploaded receipt.
+    2. Assigns general baseline features (`GENERAL_FEATURE_DEFAULTS`) for any
+       missing features not present on the receipt.
+    3. Feeds the complete feature vector into the MLP model (default) or LSTM model
+       to predict whether the transaction is fraud or legitimate.
+    """
+    _ensure_models_loaded()
+
+    file_bytes: Optional[bytes] = None
+    filename = ""
+    content_type = ""
+
+    if file is not None:
+        file_bytes = await file.read()
+        filename = file.filename or ""
+        content_type = file.content_type or ""
+
+    form_fields = {
+        "transaction_amount": transaction_amount,
+        "transaction_time": transaction_time,
+        "location": location,
+        "device_id": device_id,
+        "merchant_category": merchant_category,
+        "account_age_days": account_age_days,
+        "transaction_count_24h": transaction_count_24h,
+        "avg_transaction_amount": avg_transaction_amount,
+    }
+    supplied_overrides = {k: v for k, v in form_fields.items() if v is not None}
+
+    # When a receipt file is uploaded, missing features default to GENERAL_FEATURE_DEFAULTS
+    # unless the caller explicitly requested use_form_overrides=True.
+    # When no file is uploaded, any supplied form fields are used and missing ones get general defaults.
+    active_overrides = supplied_overrides if (not file_bytes or use_form_overrides) else None
+
+    parsed = extract_and_impute_receipt(
+        file_bytes=file_bytes,
+        filename=filename,
+        content_type=content_type,
+        form_overrides=active_overrides,
+    )
+
+    final_features = parsed["final_features"]
+    extracted_features = parsed["extracted_features"]
+    imputed_features = parsed["imputed_features"]
+    missing_features = parsed["missing_features"]
+    raw_text = parsed["raw_text"]
+
+    model_choice = (model or "mlp").lower().strip()
+    if model_choice == "lstm":
         if lstm_detector is None or lstm_detector.model is None:
             raise HTTPException(status_code=503, detail="LSTM model not loaded.")
-        result = lstm_detector.predict(data)
+        result = lstm_detector.predict(final_features, threshold=threshold)
     else:
+        model_choice = "mlp"
         if detector is None or detector.model is None:
             raise HTTPException(status_code=503, detail="MLP model not loaded.")
-        result = detector.predict(data)
+        result = detector.predict(final_features, threshold=threshold)
 
-    message = ("Transaction flagged as potentially fraudulent" if result["is_fraud"] else "Transaction appears legitimate")
+    extracted_names = list(extracted_features.keys())
+    imputed_names = list(imputed_features.keys())
+    verdict_str = (
+        "Transaction flagged as potentially fraudulent"
+        if result["is_fraud"]
+        else "Transaction appears legitimate"
+    )
+    if file_bytes:
+        message = (
+            f"{verdict_str} (Extracted {len(extracted_names)} feature(s) from receipt"
+            f"{': ' + ', '.join(extracted_names) if extracted_names else ''}; "
+            f"applied general defaults for {len(imputed_names)} missing feature(s))"
+        )
+    else:
+        message = verdict_str
+
     return PredictionResponse(
         is_fraud=result["is_fraud"],
         fraud_probability=result["fraud_probability"],
         risk_level=result["risk_level"],
         message=message,
+        extracted_features=extracted_features,
+        imputed_features=imputed_features,
+        missing_features=missing_features,
+        final_features=final_features,
+        raw_text=raw_text,
+        model_used=model_choice,
     )
+
+
 @app.post("/predict", response_model=PredictionResponse)
 async def predict_fraud(transaction: Transaction):
     """Predict if a transaction is fraudulent"""
+    _ensure_models_loaded()
     if detector is None or detector.model is None:
         raise HTTPException(status_code=503, detail="Model not loaded. Train a model first.")
-    
+
     try:
-        transaction_dict = transaction.model_dump()
-        device_id = transaction_dict.pop('device_id')
-        
-        result = detector.predict(transaction_dict)
-        
-        message = ("Transaction flagged as potentially fraudulent" 
-                   if result['is_fraud'] 
-                   else "Transaction appears legitimate")
-        
+        transaction_dict = _model_to_dict(transaction)
+        threshold = transaction_dict.pop("threshold", 0.5) or 0.5
+        final_features = dict(transaction_dict)
+        transaction_dict.pop("device_id", None)
+
+        result = detector.predict(transaction_dict, threshold=threshold)
+
+        message = (
+            "Transaction flagged as potentially fraudulent"
+            if result["is_fraud"]
+            else "Transaction appears legitimate"
+        )
+
         return PredictionResponse(
-            is_fraud=result['is_fraud'],
-            fraud_probability=result['fraud_probability'],
-            risk_level=result['risk_level'],
-            message=message
+            is_fraud=result["is_fraud"],
+            fraud_probability=result["fraud_probability"],
+            risk_level=result["risk_level"],
+            message=message,
+            final_features=final_features,
+            model_used="mlp",
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
 
 
-
 @app.post("/batch-predict", response_model=BatchPredictionResponse)
 async def batch_predict_fraud(request: BatchPredictionRequest):
     """Predict fraud for multiple transactions"""
+    _ensure_models_loaded()
     if detector is None or detector.model is None:
         raise HTTPException(status_code=503, detail="Model not loaded.")
-    
+
     predictions = []
     flagged_count = 0
-    
+
     for transaction in request.transactions:
-        transaction_dict = transaction.model_dump()
-        transaction_dict.pop('device_id')
-        
+        transaction_dict = _model_to_dict(transaction)
+        transaction_dict.pop("device_id", None)
+
         result = detector.predict(transaction_dict, request.threshold)
-        
-        if result['is_fraud']:
+
+        if result["is_fraud"]:
             flagged_count += 1
             message = "Transaction flagged as potentially fraudulent"
         else:
             message = "Transaction appears legitimate"
-        
+
         predictions.append(PredictionResponse(
-            is_fraud=result['is_fraud'],
-            fraud_probability=result['fraud_probability'],
-            risk_level=result['risk_level'],
-            message=message
+            is_fraud=result["is_fraud"],
+            fraud_probability=result["fraud_probability"],
+            risk_level=result["risk_level"],
+            message=message,
+            model_used="mlp",
         ))
-    
+
     return BatchPredictionResponse(
         predictions=predictions,
         total_transactions=len(predictions),
@@ -370,14 +539,14 @@ async def batch_predict_fraud(request: BatchPredictionRequest):
 async def train_model():
     """Train the PyTorch fraud detection model"""
     global detector, training_history, eval_metrics
-    
+
     try:
         from src.data_pipeline import DataPipeline
         from src.preprocessing import Preprocessor
         from src.train_model import PyTorchTrainer
         from src.pytorch_model import create_data_loaders
         from src.evaluate import ModelEvaluator
-        
+
         # Data pipeline
         pipeline = DataPipeline()
         pipeline.load_data()
@@ -385,18 +554,18 @@ async def train_model():
         pipeline.feature_engineering()
         pipeline.encode_categorical()
         X_train, X_test, y_train, y_test = pipeline.prepare_data()
-        
+
         # Preprocessing
         preprocessor = Preprocessor()
         X_train_scaled, X_test_scaled = preprocessor.fit_transform(X_train, X_test)
-        
-        os.makedirs('models', exist_ok=True)
-        pickle.dump(preprocessor.scaler, open('models/scaler.pkl', 'wb'))
-        
+
+        os.makedirs(MODELS_DIR, exist_ok=True)
+        pickle.dump(preprocessor.scaler, open(MODELS_DIR / "scaler.pkl", "wb"))
+
         feature_names = list(X_train.columns)
-        with open('models/feature_names.json', 'w') as f:
+        with open(MODELS_DIR / "feature_names.json", "w") as f:
             json.dump(feature_names, f)
-        
+
         # Create data loaders
         input_dim = X_train_scaled.shape[1]
         train_loader, test_loader = create_data_loaders(
@@ -404,7 +573,7 @@ async def train_model():
             X_test_scaled, y_test.values,
             batch_size=512
         )
-        
+
         # Train
         trainer = PyTorchTrainer(input_dim)
         trainer.build_model()
@@ -412,29 +581,29 @@ async def train_model():
             train_loader, test_loader, y_train,
             epochs=50, learning_rate=0.001, patience=10
         )
-        trainer.save_model('models/')
-        
+        trainer.save_model(str(MODELS_DIR) + "/")
+
         # Evaluate
         predictions, probabilities = trainer.predict(X_test_scaled)
-        evaluator = ModelEvaluator(y_test.values, predictions, probabilities, 'PyTorch Neural Network')
+        evaluator = ModelEvaluator(y_test.values, predictions, probabilities, "PyTorch Neural Network")
         metrics = evaluator.calculate_metrics()
         eval_metrics = {k: float(v) for k, v in metrics.items()}
-        
-        with open('models/eval_metrics.json', 'w') as f:
+
+        with open(MODELS_DIR / "eval_metrics.json", "w") as f:
             json.dump(eval_metrics, f, indent=2)
-        
+
         # Reload model
-        detector = FraudDetector()
+        detector = FraudDetector(model_path=str(MODELS_DIR))
         detector.load_model()
         detector.load_scaler()
         detector.load_feature_names()
-        
+
         return {
             "status": "success",
             "message": "PyTorch model trained and saved successfully",
             "metrics": eval_metrics
         }
-        
+
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -444,13 +613,14 @@ async def train_model():
 @app.get("/model-info-lstm")
 async def lstm_model_info():
     """Get LSTM model architecture and info"""
+    _ensure_models_loaded()
     if lstm_detector is None or lstm_detector.model is None:
         return {"message": "No LSTM model loaded. Train a model first via /train-lstm."}
-    
+
     model = lstm_detector.model
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    
+
     return {
         "model_type": "FraudLSTMNet (Bidirectional LSTM)",
         "framework": "PyTorch",
@@ -466,26 +636,32 @@ async def lstm_model_info():
 @app.post("/predict-lstm", response_model=PredictionResponse)
 async def predict_fraud_lstm(transaction: Transaction):
     """Predict if a transaction is fraudulent using the LSTM model"""
+    _ensure_models_loaded()
     if lstm_detector is None or lstm_detector.model is None:
         raise HTTPException(status_code=503, detail="LSTM model not loaded. Train via /train-lstm first.")
-    
+
     try:
-        transaction_dict = transaction.model_dump()
-        device_id = transaction_dict.pop('device_id')
-        
+        transaction_dict = _model_to_dict(transaction)
+        final_features = dict(transaction_dict)
+        transaction_dict.pop("device_id", None)
+
         result = lstm_detector.predict(transaction_dict)
-        
-        message = ("[LSTM] Transaction flagged as potentially fraudulent" 
-                   if result['is_fraud'] 
-                   else "[LSTM] Transaction appears legitimate")
-        
-        return PredictionResponse(
-            is_fraud=result['is_fraud'],
-            fraud_probability=result['fraud_probability'],
-            risk_level=result['risk_level'],
-            message=message
+
+        message = (
+            "[LSTM] Transaction flagged as potentially fraudulent"
+            if result["is_fraud"]
+            else "[LSTM] Transaction appears legitimate"
         )
-        
+
+        return PredictionResponse(
+            is_fraud=result["is_fraud"],
+            fraud_probability=result["fraud_probability"],
+            risk_level=result["risk_level"],
+            message=message,
+            final_features=final_features,
+            model_used="lstm",
+        )
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"LSTM Prediction error: {str(e)}")
 
@@ -494,41 +670,37 @@ async def predict_fraud_lstm(transaction: Transaction):
 async def train_lstm_model():
     """Train the LSTM fraud detection model"""
     global lstm_detector
-    
+
     try:
         from src.data_pipeline import DataPipeline
         from src.preprocessing import Preprocessor
         from src.train_model import LSTMTrainer
         from src.pytorch_model import create_sequence_data_loaders
         from src.evaluate import ModelEvaluator
-        import pandas as pd
-        
+        from sklearn.model_selection import train_test_split
+
         # Data pipeline - keep customer_id & transaction_time for sequencing
         pipeline = DataPipeline()
         pipeline.load_data()
         pipeline.handle_missing_values()
         pipeline.feature_engineering()
         pipeline.encode_categorical()
-        
-        # We need to split while retaining customer_id & transaction_time
-        # for the sequence builder
-        from sklearn.model_selection import train_test_split
-        
+
         df = pipeline.df.copy()
-        
+
         # Remove transaction_id & device_id but keep customer_id
-        for col in ['transaction_id', 'device_id']:
+        for col in ["transaction_id", "device_id"]:
             if col in df.columns:
                 df.drop(col, axis=1, inplace=True)
-        
+
         train_df, test_df = train_test_split(
-            df, test_size=0.2, random_state=42, stratify=df['is_fraud']
+            df, test_size=0.2, random_state=42, stratify=df["is_fraud"]
         )
-        
+
         # Determine feature columns (everything except identifiers and target)
-        exclude_cols = {'customer_id', 'is_fraud', 'transaction_time'}
+        exclude_cols = {"customer_id", "is_fraud", "transaction_time"}
         feature_cols = [c for c in train_df.columns if c not in exclude_cols]
-        
+
         # Scale features in-place
         preprocessor = Preprocessor()
         train_df[feature_cols] = preprocessor.fit_transform(
@@ -537,60 +709,56 @@ async def train_lstm_model():
         test_df[feature_cols] = preprocessor.transform(
             test_df[feature_cols]
         )
-        
-        os.makedirs('models', exist_ok=True)
-        pickle.dump(preprocessor.scaler, open('models/scaler.pkl', 'wb'))
-        
-        with open('models/feature_names_lstm.json', 'w') as f:
+
+        os.makedirs(MODELS_DIR, exist_ok=True)
+        pickle.dump(preprocessor.scaler, open(MODELS_DIR / "scaler.pkl", "wb"))
+
+        with open(MODELS_DIR / "feature_names_lstm.json", "w") as f:
             json.dump(feature_cols, f)
-        
+
         # Create sequence data loaders
         seq_length = 10
         train_loader, test_loader, input_dim = create_sequence_data_loaders(
             train_df, test_df, feature_cols,
             seq_length=seq_length, batch_size=512
         )
-        
+
         # Train LSTM
         trainer = LSTMTrainer(input_dim, seq_length=seq_length)
         trainer.build_model()
-        y_train = train_df['is_fraud']
-        lstm_history = trainer.train(
+        y_train = train_df["is_fraud"]
+        trainer.train(
             train_loader, test_loader, y_train,
             epochs=50, learning_rate=0.001, patience=10
         )
-        trainer.save_model('models/')
-        
+        trainer.save_model(str(MODELS_DIR) + "/")
+
         # Evaluate
         predictions, probabilities = trainer.predict(test_loader)
-        y_test_labels = test_df['is_fraud'].values
-        
-        # The test_loader re-builds sequences, so label count matches dataset length
-        # Use the labels from the test_loader's dataset directly
         test_labels_from_loader = test_loader.dataset.labels.numpy()
-        
+
         evaluator = ModelEvaluator(
             test_labels_from_loader, predictions, probabilities,
-            'LSTM Neural Network'
+            "LSTM Neural Network"
         )
         metrics = evaluator.calculate_metrics()
         lstm_eval_metrics = {k: float(v) for k, v in metrics.items()}
-        
-        with open('models/eval_metrics_lstm.json', 'w') as f:
+
+        with open(MODELS_DIR / "eval_metrics_lstm.json", "w") as f:
             json.dump(lstm_eval_metrics, f, indent=2)
-        
+
         # Reload LSTM model
-        lstm_detector = LSTMFraudDetector()
+        lstm_detector = LSTMFraudDetector(model_path=str(MODELS_DIR))
         lstm_detector.load_model()
         lstm_detector.load_scaler()
         lstm_detector.load_feature_names()
-        
+
         return {
             "status": "success",
             "message": "LSTM model trained and saved successfully",
             "metrics": lstm_eval_metrics
         }
-        
+
     except Exception as e:
         import traceback
         traceback.print_exc()
