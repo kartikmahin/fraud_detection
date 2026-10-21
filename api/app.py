@@ -233,6 +233,7 @@ async def root():
             "predict_receipt": "/predict-receipt",
             "extract_receipt": "/extract-receipt",
             "file_complaint": "/file-complaint",
+            "analyze": "/analyze",
             "predict_lstm": "/predict-lstm",
             "batch_predict": "/batch-predict",
             "health": "/health",

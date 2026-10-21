@@ -259,7 +259,7 @@ if __name__ == '__main__':
     output_path = 'data/transactions.csv'
     df.to_csv(output_path, index=False)
 
-    print(f"\n✅ Dataset saved to: {output_path}")
+    print(f"\n[OK] Dataset saved to: {output_path}")
     print(f"   Shape: {df.shape}")
     print(f"   Columns: {list(df.columns)}")
     print(f"\n--- Class Distribution ---")
