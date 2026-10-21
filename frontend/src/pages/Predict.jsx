@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { predictFraud, predictFromReceipt, extractReceipt } from '../api';
+import { predictFraud, predictFromReceipt, extractReceipt, analyzeFraud } from '../api';
 
 /**
  * Generate a human-readable analysis summary based on the transaction inputs
@@ -128,6 +128,13 @@ function generateAnalysisSummary(form, result) {
   return { factors, positiveFactors };
 }
 
+/* Category label + color mapping for rule signals */
+const CATEGORY_META = {
+  ip_anomaly: { label: 'IP Anomaly', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' },
+  small_amount: { label: 'Small-Amount Pattern', color: '#ec4899', bg: 'rgba(236,72,153,0.12)' },
+  velocity: { label: 'Velocity', color: '#8b5cf6', bg: 'rgba(139,92,246,0.12)' },
+};
+
 export default function Predict() {
   const [form, setForm] = useState({
     transaction_amount: 250,
@@ -138,6 +145,16 @@ export default function Predict() {
     account_age_days: 365,
     transaction_count_24h: 3,
     avg_transaction_amount: 150,
+    // IP metadata
+    ip_country: '',
+    ip_is_vpn: false,
+    ip_is_proxy: false,
+    ip_login_count: '',
+    ip_geo_distance_km: '',
+    // Small-amount context
+    small_txn_count_6h: '',
+    cumulative_amount_6h: '',
+    same_merchant_count_1h: '',
   });
   const [threshold, setThreshold] = useState(0.5);
   const [result, setResult] = useState(null);
@@ -147,9 +164,42 @@ export default function Predict() {
   const [selectedModel, setSelectedModel] = useState('mlp');
   const [analysisForm, setAnalysisForm] = useState(null);
   const [extracting, setExtracting] = useState(false);
+  const [analysisMode, setAnalysisMode] = useState('full'); // 'full' (ML+rules) or 'ml_only'
+  const [showIpFields, setShowIpFields] = useState(false);
+  const [showPatternFields, setShowPatternFields] = useState(false);
 
   const handleChange = (field, value) => {
     setForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  /* Build the payload — strip empty optional fields */
+  const buildPayload = () => {
+    const payload = {
+      transaction_amount: form.transaction_amount,
+      transaction_time: form.transaction_time,
+      location: form.location,
+      device_id: form.device_id,
+      merchant_category: form.merchant_category,
+      account_age_days: form.account_age_days,
+      transaction_count_24h: form.transaction_count_24h,
+      avg_transaction_amount: form.avg_transaction_amount,
+    };
+    // IP fields — only include if user provided them
+    if (form.ip_country) payload.ip_country = form.ip_country;
+    if (form.ip_is_vpn) payload.ip_is_vpn = true;
+    if (form.ip_is_proxy) payload.ip_is_proxy = true;
+    if (form.ip_login_count !== '' && form.ip_login_count !== null)
+      payload.ip_login_count = parseInt(form.ip_login_count) || 0;
+    if (form.ip_geo_distance_km !== '' && form.ip_geo_distance_km !== null)
+      payload.ip_geo_distance_km = parseFloat(form.ip_geo_distance_km) || 0;
+    // Small-amount pattern fields
+    if (form.small_txn_count_6h !== '' && form.small_txn_count_6h !== null)
+      payload.small_txn_count_6h = parseInt(form.small_txn_count_6h) || 0;
+    if (form.cumulative_amount_6h !== '' && form.cumulative_amount_6h !== null)
+      payload.cumulative_amount_6h = parseFloat(form.cumulative_amount_6h) || 0;
+    if (form.same_merchant_count_1h !== '' && form.same_merchant_count_1h !== null)
+      payload.same_merchant_count_1h = parseInt(form.same_merchant_count_1h) || 0;
+    return payload;
   };
 
   const handleSubmit = async () => {
@@ -162,10 +212,18 @@ export default function Predict() {
       if (receiptFile) {
         // Use the receipt endpoint (file + form data)
         res = await predictFromReceipt(form, receiptFile, selectedModel);
+        res._mode = 'ml_only';
+      } else if (analysisMode === 'full') {
+        // Full analysis: ML + rules + fusion
+        const payload = buildPayload();
+        res = await analyzeFraud(payload, threshold);
+        res._mode = 'full';
       } else {
-        res = await predictFraud(form, threshold);
+        res = await predictFraud(buildPayload(), threshold);
+        res._mode = 'ml_only';
       }
-      setResult({ ...res, model_used: selectedModel });
+      res.model_used = res.model_used || selectedModel;
+      setResult(res);
       setAnalysisForm({ ...form });
     } catch (err) {
       setError(err.message);
@@ -202,23 +260,47 @@ export default function Predict() {
     }
   };
 
-  const riskClass = result
-    ? result.risk_level === 'HIGH'
-      ? 'danger'
-      : result.risk_level === 'MEDIUM'
-      ? 'warning'
-      : 'safe'
-    : '';
+  /* Determine display risk class */
+  const riskLevel = result?.risk_level || '';
+  const riskClass = riskLevel === 'HIGH' ? 'danger' : riskLevel === 'MEDIUM' ? 'warning' : 'safe';
 
   const hourOfDay = Math.floor(form.transaction_time / 3600);
 
-  const analysis = result && analysisForm ? generateAnalysisSummary(analysisForm, result) : null;
+  const analysis = result && analysisForm && result._mode === 'ml_only'
+    ? generateAnalysisSummary(analysisForm, result)
+    : null;
+
+  /* For full-analysis mode */
+  const isFull = result && result._mode === 'full';
+  const fraudProb = isFull ? result.final_risk_score : result?.fraud_probability;
 
   return (
     <div>
       <div className="page-header">
         <h2>Fraud Prediction</h2>
-        <p>Analyze a transaction for fraud risk using deep learning models</p>
+        <p>Analyze a transaction for fraud risk using deep learning + rule engine</p>
+      </div>
+
+      {/* Mode Selector */}
+      <div className="model-selector" style={{ marginBottom: 'var(--space-sm)' }}>
+        <span className="model-selector-label">Analysis Mode</span>
+        <div className="model-selector-pills">
+          <button
+            className={`model-pill ${analysisMode === 'full' ? 'active' : ''}`}
+            onClick={() => setAnalysisMode('full')}
+            style={analysisMode === 'full' ? { borderColor: '#10b981' } : {}}
+          >
+            Full Analysis
+            <span className="model-pill-badge">ML + Rules</span>
+          </button>
+          <button
+            className={`model-pill ${analysisMode === 'ml_only' ? 'active' : ''}`}
+            onClick={() => setAnalysisMode('ml_only')}
+          >
+            ML Only
+            <span className="model-pill-badge">Legacy</span>
+          </button>
+        </div>
       </div>
 
       {/* Model Selector */}
@@ -361,6 +443,131 @@ export default function Predict() {
             </div>
             </div>
 
+          {/* --- IP Metadata Section (collapsible) --- */}
+          {analysisMode === 'full' && (
+            <div style={{ marginTop: 'var(--space-md)' }}>
+              <button
+                className="btn btn-outline"
+                style={{ width: '100%', fontSize: '0.8rem', padding: '8px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                onClick={() => setShowIpFields(!showIpFields)}
+              >
+                <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#f59e0b' }}></span>
+                  IP Metadata (optional)
+                </span>
+                <span>{showIpFields ? '▲' : '▼'}</span>
+              </button>
+              {showIpFields && (
+                <div className="grid-2" style={{ gap: 'var(--space-md)', marginTop: 'var(--space-md)', padding: 'var(--space-md)', background: 'var(--bg-secondary)', borderRadius: 'var(--radius-md)' }}>
+                  <div className="form-group">
+                    <label className="form-label">IP Country Code</label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      placeholder="e.g. IN, US, GB"
+                      value={form.ip_country}
+                      onChange={(e) => handleChange('ip_country', e.target.value)}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">IP Geo Distance (km)</label>
+                    <input
+                      type="number"
+                      className="form-input"
+                      placeholder="Distance from registered city"
+                      value={form.ip_geo_distance_km}
+                      onChange={(e) => handleChange('ip_geo_distance_km', e.target.value)}
+                      min="0"
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">IP Login Count (24h)</label>
+                    <input
+                      type="number"
+                      className="form-input"
+                      placeholder="Accounts on this IP"
+                      value={form.ip_login_count}
+                      onChange={(e) => handleChange('ip_login_count', e.target.value)}
+                      min="0"
+                    />
+                  </div>
+                  <div className="form-group" style={{ display: 'flex', gap: 'var(--space-lg)', alignItems: 'center', marginTop: '12px' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.85rem' }}>
+                      <input
+                        type="checkbox"
+                        checked={form.ip_is_vpn}
+                        onChange={(e) => handleChange('ip_is_vpn', e.target.checked)}
+                      />
+                      VPN Detected
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.85rem' }}>
+                      <input
+                        type="checkbox"
+                        checked={form.ip_is_proxy}
+                        onChange={(e) => handleChange('ip_is_proxy', e.target.checked)}
+                      />
+                      Proxy Detected
+                    </label>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* --- Small-Amount Pattern Section (collapsible) --- */}
+          {analysisMode === 'full' && (
+            <div style={{ marginTop: 'var(--space-md)' }}>
+              <button
+                className="btn btn-outline"
+                style={{ width: '100%', fontSize: '0.8rem', padding: '8px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                onClick={() => setShowPatternFields(!showPatternFields)}
+              >
+                <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#ec4899' }}></span>
+                  Pattern Context (optional)
+                </span>
+                <span>{showPatternFields ? '▲' : '▼'}</span>
+              </button>
+              {showPatternFields && (
+                <div className="grid-2" style={{ gap: 'var(--space-md)', marginTop: 'var(--space-md)', padding: 'var(--space-md)', background: 'var(--bg-secondary)', borderRadius: 'var(--radius-md)' }}>
+                  <div className="form-group">
+                    <label className="form-label">Small Txns in 6h ({"<"} ₹200)</label>
+                    <input
+                      type="number"
+                      className="form-input"
+                      placeholder="Count of small txns"
+                      value={form.small_txn_count_6h}
+                      onChange={(e) => handleChange('small_txn_count_6h', e.target.value)}
+                      min="0"
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Cumulative Amount 6h (₹)</label>
+                    <input
+                      type="number"
+                      className="form-input"
+                      placeholder="Total small amounts"
+                      value={form.cumulative_amount_6h}
+                      onChange={(e) => handleChange('cumulative_amount_6h', e.target.value)}
+                      min="0"
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Same Merchant Hits (1h)</label>
+                    <input
+                      type="number"
+                      className="form-input"
+                      placeholder="Repeat merchant count"
+                      value={form.same_merchant_count_1h}
+                      onChange={(e) => handleChange('same_merchant_count_1h', e.target.value)}
+                      min="0"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="slider-container" style={{ marginTop: 'var(--space-md)' }}>
             <div className="slider-header">
               <label className="form-label" style={{ margin: 0 }}>Detection Threshold</label>
@@ -389,10 +596,14 @@ export default function Predict() {
             {loading ? (
               <>
                 <div className="spinner" style={{ width: '18px', height: '18px', borderWidth: '2px' }}></div>
-                Analyzing with {selectedModel === 'lstm' ? 'LSTM' : 'MLP'}...
+                {analysisMode === 'full' ? 'Running Full Analysis...' : `Analyzing with ${selectedModel === 'lstm' ? 'LSTM' : 'MLP'}...`}
               </>
             ) : (
-              <>Analyze Transaction ({selectedModel === 'lstm' ? 'LSTM' : 'MLP'})</>
+              <>
+                {analysisMode === 'full'
+                  ? 'Run Full Analysis (ML + Rules)'
+                  : `Analyze Transaction (${selectedModel === 'lstm' ? 'LSTM' : 'MLP'})`}
+              </>
             )}
           </button>
         </div>
@@ -402,9 +613,17 @@ export default function Predict() {
           <div className="card-header">
             <span className="card-title">Analysis Result</span>
             {result && (
-              <span className={`model-tag ${result.model_used}`}>
-                {result.model_used === 'lstm' ? 'LSTM' : 'MLP'}
-              </span>
+              <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                {isFull && (
+                  <span style={{
+                    padding: '2px 8px', borderRadius: '99px', fontSize: '0.65rem',
+                    fontWeight: 600, background: 'rgba(16,185,129,0.12)', color: '#10b981',
+                  }}>ML+Rules</span>
+                )}
+                <span className={`model-tag ${result.model_used}`}>
+                  {result.model_used === 'lstm' ? 'LSTM' : 'MLP'}
+                </span>
+              </div>
             )}
           </div>
 
@@ -421,45 +640,106 @@ export default function Predict() {
                 {result.is_fraud ? 'FRAUD DETECTED' : 'LEGITIMATE'}
               </div>
               <div className="result-probability" style={{ color: result.is_fraud ? 'var(--danger)' : 'var(--success)' }}>
-                {(result.fraud_probability * 100).toFixed(1)}%
+                {((fraudProb || 0) * 100).toFixed(1)}%
               </div>
-              <span className={`risk-badge ${result.risk_level.toLowerCase()}`}>
-                {result.risk_level} RISK
+              <span className={`risk-badge ${riskLevel.toLowerCase()}`}>
+                {riskLevel} RISK
               </span>
 
               <div className="result-details">
-                <div className="result-detail">
-                  <div className="result-detail-label">Probability</div>
-                  <div className="result-detail-value">{(result.fraud_probability * 100).toFixed(2)}%</div>
-                </div>
-                <div className="result-detail">
-                  <div className="result-detail-label">Risk Level</div>
-                  <div className="result-detail-value">{result.risk_level}</div>
-                </div>
-                <div className="result-detail">
-                  <div className="result-detail-label">Model</div>
-                  <div className="result-detail-value">{result.model_used === 'lstm' ? 'LSTM' : 'MLP (DNN)'}</div>
-                </div>
+                {isFull ? (
+                  <>
+                    <div className="result-detail">
+                      <div className="result-detail-label">Final Score</div>
+                      <div className="result-detail-value">{(result.final_risk_score * 100).toFixed(2)}%</div>
+                    </div>
+                    <div className="result-detail">
+                      <div className="result-detail-label">ML Score</div>
+                      <div className="result-detail-value" style={{ color: '#3b82f6' }}>{(result.ml_score * 100).toFixed(2)}%</div>
+                    </div>
+                    <div className="result-detail">
+                      <div className="result-detail-label">Rule Score</div>
+                      <div className="result-detail-value" style={{ color: '#f59e0b' }}>{(result.rule_score * 100).toFixed(2)}%</div>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="result-detail">
+                      <div className="result-detail-label">Probability</div>
+                      <div className="result-detail-value">{(result.fraud_probability * 100).toFixed(2)}%</div>
+                    </div>
+                    <div className="result-detail">
+                      <div className="result-detail-label">Risk Level</div>
+                      <div className="result-detail-value">{riskLevel}</div>
+                    </div>
+                    <div className="result-detail">
+                      <div className="result-detail-label">Model</div>
+                      <div className="result-detail-value">{result.model_used === 'lstm' ? 'LSTM' : 'MLP (DNN)'}</div>
+                    </div>
+                  </>
+                )}
               </div>
 
-              {/* Probability gauge */}
-              <div style={{ marginTop: 'var(--space-xl)' }}>
-                <div className="progress-bar-container" style={{ height: '12px' }}>
-                  <div
-                    className="progress-bar-fill"
-                    style={{
-                      width: `${result.fraud_probability * 100}%`,
-                      background: result.is_fraud
-                        ? 'var(--gradient-danger)'
-                        : 'var(--gradient-success)',
-                    }}
-                  ></div>
+              {/* Score Breakdown Bar (full analysis) */}
+              {isFull && (
+                <div style={{ marginTop: 'var(--space-lg)' }}>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '6px' }}>Score Composition</div>
+                  <div style={{ display: 'flex', borderRadius: '6px', overflow: 'hidden', height: '14px', background: 'var(--bg-tertiary)' }}>
+                    <div style={{
+                      width: `${Math.min(100, result.ml_score * 100 * 0.6)}%`,
+                      background: 'linear-gradient(90deg, #3b82f6, #60a5fa)',
+                      transition: 'width 0.8s ease',
+                    }}></div>
+                    <div style={{
+                      width: `${Math.min(100 - result.ml_score * 100 * 0.6, result.rule_score * 100)}%`,
+                      background: 'linear-gradient(90deg, #f59e0b, #fbbf24)',
+                      transition: 'width 0.8s ease',
+                    }}></div>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '4px', fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                    <span style={{ color: '#3b82f6' }}>● ML ({(result.ml_score * 100).toFixed(1)}%)</span>
+                    <span style={{ color: '#f59e0b' }}>● Rules ({(result.rule_score * 100).toFixed(1)}%)</span>
+                  </div>
                 </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '4px', fontSize: '0.7rem', color: 'var(--text-muted)' }}>
-                  <span>Safe</span>
-                  <span>Fraudulent</span>
+              )}
+
+              {/* Probability gauge (ML-only mode) */}
+              {!isFull && (
+                <div style={{ marginTop: 'var(--space-xl)' }}>
+                  <div className="progress-bar-container" style={{ height: '12px' }}>
+                    <div
+                      className="progress-bar-fill"
+                      style={{
+                        width: `${result.fraud_probability * 100}%`,
+                        background: result.is_fraud
+                          ? 'var(--gradient-danger)'
+                          : 'var(--gradient-success)',
+                      }}
+                    ></div>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '4px', fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                    <span>Safe</span>
+                    <span>Fraudulent</span>
+                  </div>
                 </div>
-              </div>
+              )}
+
+              {/* Fraud type indicators (full mode) */}
+              {isFull && result.fraud_type_indicators && result.fraud_type_indicators.length > 0 && (
+                <div style={{ marginTop: 'var(--space-lg)', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                  {result.fraud_type_indicators.map((type) => {
+                    const meta = CATEGORY_META[type] || { label: type, color: '#6b7280', bg: 'rgba(107,114,128,0.12)' };
+                    return (
+                      <span key={type} style={{
+                        padding: '3px 10px', borderRadius: '99px', fontSize: '0.7rem',
+                        fontWeight: 600, background: meta.bg, color: meta.color,
+                      }}>
+                        {meta.label}
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
 
               <p style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', marginTop: 'var(--space-lg)' }}>
                 {result.message}
@@ -471,14 +751,91 @@ export default function Predict() {
             <div className="empty-state">
               <p>Submit a transaction to see the analysis result</p>
               <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '8px' }}>
-                Choose MLP or LSTM model above, then analyze the transaction
+                {analysisMode === 'full'
+                  ? 'Full Analysis combines ML model with IP & pattern rules'
+                  : 'Choose MLP or LSTM model above, then analyze the transaction'}
               </p>
             </div>
           )}
         </div>
       </div>
 
-      {/* Analysis Summary - shows after prediction */}
+      {/* --- Signal Breakdown (Full Analysis Mode) --- */}
+      {isFull && (result.signals?.length > 0 || result.positive_signals?.length > 0) && (
+        <div className="card animate-in" style={{ marginTop: 'var(--space-xl)' }}>
+          <div className="card-header">
+            <span className="card-title">
+              Signal Breakdown — {result.signals?.length || 0} risk signal{result.signals?.length !== 1 ? 's' : ''} detected
+            </span>
+          </div>
+
+          {/* Triggered risk signals */}
+          {result.signals && result.signals.length > 0 && (
+            <div className="analysis-section">
+              <div className="analysis-section-header risk">
+                <span>Risk Signals ({result.signals.length})</span>
+              </div>
+              <div className="analysis-factors-list">
+                {result.signals.map((sig, i) => {
+                  const meta = CATEGORY_META[sig.category] || { label: sig.category, color: '#6b7280', bg: 'rgba(107,114,128,0.12)' };
+                  const sevClass = sig.severity >= 0.6 ? 'high' : sig.severity >= 0.3 ? 'medium' : 'low';
+                  return (
+                    <div key={i} className={`analysis-factor-item ${sevClass}`}>
+                      <div className="analysis-factor-content">
+                        <div className="analysis-factor-label" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <span style={{
+                            padding: '1px 6px', borderRadius: '4px', fontSize: '0.6rem',
+                            fontWeight: 600, background: meta.bg, color: meta.color,
+                          }}>{meta.label}</span>
+                          {sig.rule_id.replace(/_/g, ' ')}
+                        </div>
+                        <div className="analysis-factor-detail">{sig.explanation}</div>
+                        <div style={{ display: 'flex', gap: '12px', marginTop: '4px', fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                          <span>Severity: {(sig.severity * 100).toFixed(0)}%</span>
+                          <span>Weight: {(sig.weight * 100).toFixed(0)}%</span>
+                        </div>
+                      </div>
+                      <span className={`analysis-severity-badge ${sevClass}`}>
+                        {sevClass}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Positive signals (non-triggered) */}
+          {result.positive_signals && result.positive_signals.length > 0 && (
+            <div className="analysis-section">
+              <div className="analysis-section-header safe">
+                <span>Clear Signals ({result.positive_signals.length})</span>
+              </div>
+              <div className="analysis-factors-list">
+                {result.positive_signals.map((sig, i) => {
+                  const meta = CATEGORY_META[sig.category] || { label: sig.category, color: '#6b7280', bg: 'rgba(107,114,128,0.12)' };
+                  return (
+                    <div key={i} className="analysis-factor-item positive">
+                      <div className="analysis-factor-content">
+                        <div className="analysis-factor-label" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <span style={{
+                            padding: '1px 6px', borderRadius: '4px', fontSize: '0.6rem',
+                            fontWeight: 600, background: meta.bg, color: meta.color,
+                          }}>{meta.label}</span>
+                          {sig.rule_id.replace(/_/g, ' ')}
+                        </div>
+                        <div className="analysis-factor-detail">{sig.explanation}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Analysis Summary - shows after ML-only prediction */}
       {result && analysis && (
         <div className="card animate-in" style={{ marginTop: 'var(--space-xl)' }}>
           <div className="card-header">
@@ -595,6 +952,9 @@ export default function Predict() {
                 account_age_days: 730,
                 transaction_count_24h: 2,
                 avg_transaction_amount: 75,
+                ip_country: 'IN', ip_is_vpn: false, ip_is_proxy: false,
+                ip_login_count: '1', ip_geo_distance_km: '10',
+                small_txn_count_6h: '0', cumulative_amount_6h: '50', same_merchant_count_1h: '0',
               });
               setResult(null);
               setAnalysisForm(null);
@@ -614,12 +974,37 @@ export default function Predict() {
                 account_age_days: 15,
                 transaction_count_24h: 25,
                 avg_transaction_amount: 50,
+                ip_country: 'RU', ip_is_vpn: true, ip_is_proxy: false,
+                ip_login_count: '5', ip_geo_distance_km: '4500',
+                small_txn_count_6h: '0', cumulative_amount_6h: '', same_merchant_count_1h: '0',
               });
               setResult(null);
               setAnalysisForm(null);
             }}
           >
-            Suspicious Transaction
+            🚨 IP Anomaly
+          </button>
+          <button
+            className="btn btn-outline"
+            onClick={() => {
+              setForm({
+                transaction_amount: 35,
+                transaction_time: 54000,
+                location: 'Bengaluru',
+                device_id: 'DEV050',
+                merchant_category: 'online',
+                account_age_days: 200,
+                transaction_count_24h: 18,
+                avg_transaction_amount: 150,
+                ip_country: 'IN', ip_is_vpn: true, ip_is_proxy: false,
+                ip_login_count: '2', ip_geo_distance_km: '100',
+                small_txn_count_6h: '12', cumulative_amount_6h: '1800', same_merchant_count_1h: '5',
+              });
+              setResult(null);
+              setAnalysisForm(null);
+            }}
+          >
+            🔢 Card Testing
           </button>
           <button
             className="btn btn-outline"
@@ -633,6 +1018,9 @@ export default function Predict() {
                 account_age_days: 60,
                 transaction_count_24h: 12,
                 avg_transaction_amount: 100,
+                ip_country: '', ip_is_vpn: false, ip_is_proxy: false,
+                ip_login_count: '', ip_geo_distance_km: '',
+                small_txn_count_6h: '', cumulative_amount_6h: '', same_merchant_count_1h: '',
               });
               setResult(null);
               setAnalysisForm(null);

@@ -170,7 +170,8 @@ class DataPipeline:
     
     def feature_engineering(self):
         """
-        Create new features for better fraud detection
+        Create new features for better fraud detection.
+        Includes IP-based and small-amount pattern features.
         """
         print("\n--- Feature Engineering ---")
         
@@ -196,11 +197,45 @@ class DataPipeline:
         self.df['high_frequency'] = (
             self.df['transaction_count_24h'] > 10
         ).astype(int)
-        
+
+        # --- IP-based features ---
+        if 'ip_is_vpn' in self.df.columns and 'ip_is_proxy' in self.df.columns:
+            self.df['ip_risk_score'] = (
+                self.df['ip_is_vpn'].fillna(0).astype(float) * 0.35 +
+                self.df['ip_is_proxy'].fillna(0).astype(float) * 0.25 +
+                (self.df.get('ip_login_count', pd.Series(1, index=self.df.index)).fillna(1).astype(float).clip(upper=10) / 10) * 0.20 +
+                (self.df.get('ip_geo_distance_km', pd.Series(0, index=self.df.index)).fillna(0).astype(float).clip(upper=5000) / 5000) * 0.20
+            ).round(4)
+
+        if 'ip_country' in self.df.columns:
+            self.df['is_foreign_ip'] = (
+                ~self.df['ip_country'].fillna('IN').isin(['IN', 'IND', 'INDIA'])
+            ).astype(int)
+
+        if 'ip_geo_distance_km' in self.df.columns:
+            self.df['ip_geo_far'] = (
+                self.df['ip_geo_distance_km'].fillna(0) > 500
+            ).astype(int)
+
+        # --- Small-amount pattern features ---
+        if 'small_txn_count_6h' in self.df.columns:
+            self.df['small_txn_ratio_6h'] = (
+                self.df['small_txn_count_6h'].fillna(0) /
+                (self.df['transaction_count_24h'].fillna(1).clip(lower=1))
+            ).round(4)
+
+        if 'transaction_amount' in self.df.columns:
+            self.df['is_micro_transaction'] = (
+                self.df['transaction_amount'] < 100
+            ).astype(int)
+
+        if 'same_merchant_count_1h' in self.df.columns:
+            self.df['merchant_repeat_rate_1h'] = (
+                self.df['same_merchant_count_1h'].fillna(0).clip(upper=10) / 10
+            ).round(4)
+
         new_cols = len(self.df.columns) - original_cols
         print(f"Created {new_cols} new features")
-        print(f"New features: hour_of_day, is_night_transaction, amount_to_avg_ratio, "
-              f"high_amount, unusual_merchant, new_customer, high_frequency")
         
         return self.df
     
@@ -212,13 +247,20 @@ class DataPipeline:
         
         categorical_cols = self.df.select_dtypes(include=['object']).columns
         
+        # Columns to skip encoding (identifiers and informational labels)
+        skip_cols = {'transaction_id', 'device_id', 'fraud_type'}
+
         for col in categorical_cols:
-            if col not in ['transaction_id', 'device_id']:
+            if col not in skip_cols:
                 dummies = pd.get_dummies(self.df[col], prefix=col, drop_first=True)
                 self.df = pd.concat([self.df, dummies], axis=1)
                 self.df.drop(col, axis=1, inplace=True)
                 print(f"Encoded {col}")
         
+        # Drop fraud_type (informational only, not a model feature)
+        if 'fraud_type' in self.df.columns:
+            self.df.drop('fraud_type', axis=1, inplace=True)
+
         return self.df
     
     def prepare_data(self, test_size=0.2, random_state=42):

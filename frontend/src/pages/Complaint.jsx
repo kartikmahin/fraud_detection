@@ -49,13 +49,17 @@ export default function Complaint() {
 
     recognition.onerror = (event) => {
       if (event.error === 'not-allowed') {
-        setError('Microphone access denied. Please allow microphone access in your browser settings and try again.');
+        setError('Microphone access denied. Click the lock icon in your browser address bar, allow microphone access, and try again.');
       } else if (event.error === 'no-speech') {
-        setError('No speech detected. Please try again or type your complaint manually.');
+        setError('No speech detected. Please speak clearly and try again, or type your complaint manually.');
       } else if (event.error === 'network') {
-        setError('Speech recognition requires an internet connection to Google speech servers. If you are on a restricted network, please type your complaint instead.');
+        setError('Speech recognition requires internet access to Google servers. If you are on a VPN, corporate network, or firewall, the service may be blocked. Try: 1) Disable VPN  2) Use a different network  3) Type your complaint instead.');
       } else if (event.error === 'aborted') {
         setError('Speech recognition was aborted. Please try again.');
+      } else if (event.error === 'audio-capture') {
+        setError('No microphone found. Please connect a microphone and try again.');
+      } else if (event.error === 'service-not-allowed') {
+        setError('Speech service not allowed. Please check browser permissions and try again.');
       } else {
         setError(`Speech recognition error: ${event.error}. Please try typing your complaint instead.`);
       }
@@ -295,7 +299,7 @@ export default function Complaint() {
             )}
             {speechSupported && (
               <div className="form-hint" style={{ color: 'var(--text-muted)', marginTop: '4px', fontSize: '0.7rem' }}>
-                Note: Voice input requires an internet connection (uses browser speech service). If it doesn't work, please type your complaint.
+                Note: Voice input uses Google speech service and requires internet access. If blocked by firewall/VPN, please type your complaint.
               </div>
             )}
           </div>

@@ -23,6 +23,8 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from src.predict import FraudDetector, LSTMFraudDetector
 from src.receipt_parser import GENERAL_FEATURE_DEFAULTS, extract_and_impute_receipt
+from src.rule_engine import RuleEngine
+from src.fusion import FraudSignalFusion
 
 
 app = FastAPI(
@@ -53,6 +55,16 @@ class Transaction(BaseModel):
     transaction_count_24h: int = Field(..., ge=0, description="Transactions in last 24 hours")
     avg_transaction_amount: float = Field(..., gt=0, description="Average transaction amount")
     threshold: Optional[float] = Field(0.5, ge=0.0, le=1.0, description="Classification threshold")
+    # IP metadata (optional — rules are skipped if absent)
+    ip_country: Optional[str] = Field(None, description="Country code of the IP address")
+    ip_is_vpn: Optional[bool] = Field(None, description="Whether connection is via VPN")
+    ip_is_proxy: Optional[bool] = Field(None, description="Whether connection is via proxy")
+    ip_login_count: Optional[int] = Field(None, ge=0, description="Different accounts on this IP in 24h")
+    ip_geo_distance_km: Optional[float] = Field(None, ge=0, description="Distance between IP geo and registered city (km)")
+    # Small-amount context (optional)
+    small_txn_count_6h: Optional[int] = Field(None, ge=0, description="Count of txns < ₹200 in last 6 hours")
+    cumulative_amount_6h: Optional[float] = Field(None, ge=0, description="Running total of small amounts in 6h")
+    same_merchant_count_1h: Optional[int] = Field(None, ge=0, description="Txns to same merchant in last hour")
 
 
 class PredictionResponse(BaseModel):
@@ -66,6 +78,21 @@ class PredictionResponse(BaseModel):
     final_features: Optional[Dict[str, Any]] = None
     raw_text: Optional[str] = None
     model_used: Optional[str] = None
+
+
+class AnalysisResponse(BaseModel):
+    """Response for the /analyze endpoint — ML + rules + fusion."""
+    is_fraud: bool
+    final_risk_score: float
+    risk_level: str
+    ml_score: float
+    rule_score: float
+    fraud_type_indicators: List[str]
+    signals: List[Dict[str, Any]]
+    positive_signals: List[Dict[str, Any]]
+    threshold: float
+    message: str
+    model_used: str
 
 
 class ReceiptExtractResponse(BaseModel):
@@ -127,6 +154,10 @@ eval_metrics_lstm = None
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODELS_DIR = BASE_DIR / "models"
+
+# Rule engine and fusion engine (stateless singletons)
+rule_engine = RuleEngine()
+fusion_engine = FraudSignalFusion(ml_weight=0.6)
 
 
 def _ensure_models_loaded():
@@ -587,6 +618,78 @@ async def predict_fraud(transaction: Transaction):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
+
+
+@app.post("/analyze", response_model=AnalysisResponse)
+async def analyze_fraud(transaction: Transaction):
+    """Analyze a transaction using ML model + rule engine + signal fusion.
+
+    This is the recommended endpoint for multi-type fraud detection.
+    It runs the ML model for a base probability, then evaluates IP anomaly,
+    small-amount pattern, and velocity rules, and fuses all signals into a
+    single composite risk score with a full breakdown.
+
+    IP fields and small-amount context fields are optional — if omitted,
+    the corresponding rules are simply skipped and the ML score dominates.
+    """
+    _ensure_models_loaded()
+
+    # Determine which ML model to use (prefer MLP, fall back to LSTM)
+    active_detector = None
+    model_label = "mlp"
+    if detector is not None and detector.model is not None:
+        active_detector = detector
+        model_label = "mlp"
+    elif lstm_detector is not None and lstm_detector.model is not None:
+        active_detector = lstm_detector
+        model_label = "lstm"
+
+    if active_detector is None:
+        raise HTTPException(status_code=503, detail="No ML model loaded. Train a model first.")
+
+    try:
+        transaction_dict = _model_to_dict(transaction)
+        threshold = transaction_dict.pop("threshold", 0.5) or 0.5
+
+        # Run ML prediction
+        ml_input = {
+            k: v for k, v in transaction_dict.items()
+            if k not in ("device_id",)
+        }
+        ml_result = active_detector.predict(ml_input, threshold=threshold)
+        ml_probability = ml_result["fraud_probability"]
+
+        # Run rule engine on the full transaction (including IP + pattern fields)
+        rule_results = rule_engine.evaluate_all(transaction_dict)
+
+        # Fuse ML + rules
+        fused = fusion_engine.fuse(ml_probability, rule_results, threshold=threshold)
+
+        # Build message
+        if fused.is_fraud:
+            type_str = ", ".join(fused.fraud_type_indicators) if fused.fraud_type_indicators else "combined signals"
+            message = f"Transaction flagged as potentially fraudulent ({type_str})"
+        else:
+            message = "Transaction appears legitimate"
+
+        return AnalysisResponse(
+            is_fraud=fused.is_fraud,
+            final_risk_score=fused.final_risk_score,
+            risk_level=fused.risk_level,
+            ml_score=fused.ml_score,
+            rule_score=fused.rule_score,
+            fraud_type_indicators=fused.fraud_type_indicators,
+            signals=fused.signals,
+            positive_signals=fused.positive_signals,
+            threshold=fused.threshold,
+            message=message,
+            model_used=model_label,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Analysis error: {str(e)}")
 
 
 @app.post("/batch-predict", response_model=BatchPredictionResponse)
