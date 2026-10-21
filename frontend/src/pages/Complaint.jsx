@@ -30,9 +30,11 @@ export default function Complaint() {
     }
 
     const recognition = new SpeechRecognition();
-    recognition.continuous = true;
+    recognition.continuous = false;
     recognition.interimResults = true;
-    recognition.lang = 'en-IN';
+    recognition.lang = 'en-US';
+
+    let finalTranscript = description;
 
     recognition.onstart = () => {
       setIsListening(true);
@@ -40,11 +42,16 @@ export default function Complaint() {
     };
 
     recognition.onresult = (event) => {
-      let transcript = '';
-      for (let i = 0; i < event.results.length; i++) {
-        transcript += event.results[i][0].transcript;
+      let interimTranscript = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          finalTranscript += transcript + ' ';
+        } else {
+          interimTranscript += transcript;
+        }
       }
-      setDescription(transcript);
+      setDescription(finalTranscript + interimTranscript);
     };
 
     recognition.onerror = (event) => {
@@ -68,6 +75,14 @@ export default function Complaint() {
 
     recognition.onend = () => {
       setIsListening(false);
+      // Auto-restart for continuous-like behavior
+      if (isListening && recognitionRef.current === recognition) {
+        try {
+          recognition.start();
+        } catch (e) {
+          // Ignore restart errors
+        }
+      }
     };
 
     recognitionRef.current = recognition;
